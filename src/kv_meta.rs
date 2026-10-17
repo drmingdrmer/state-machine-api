@@ -42,10 +42,17 @@ pub struct KVMeta {
 
     /// The id of the cascade this record owns.
     ///
-    /// A cascade is a group of keys linked to this record. They are deleted
-    /// when this record is deleted or is written with a different id.
+    /// A cascade is a group of keys bound to this record. They are deleted
+    /// when this record is deleted or expires.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cascade_id: Option<u64>,
+
+    /// The id of the cascade this record is bound to.
+    ///
+    /// It equals the `cascade_id` of the owner record. This record is deleted
+    /// when that cascade ends.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub owner_cascade_id: Option<u64>,
 }
 
 impl KVMeta {
@@ -57,6 +64,7 @@ impl KVMeta {
             expire_at: expire_at_sec_or_ms,
             proposed_at_ms,
             cascade_id: None,
+            owner_cascade_id: None,
         }
     }
 
@@ -68,6 +76,7 @@ impl KVMeta {
             expire_at: Some(expires_at_sec_or_ms),
             proposed_at_ms: None,
             cascade_id: None,
+            owner_cascade_id: None,
         }
     }
 
@@ -102,6 +111,17 @@ impl KVMeta {
     /// Set the id of the cascade this record owns.
     pub fn with_cascade_id(mut self, cascade_id: Option<u64>) -> Self {
         self.cascade_id = cascade_id;
+        self
+    }
+
+    /// Returns the id of the cascade this record is bound to.
+    pub fn owner_cascade_id(&self) -> Option<u64> {
+        self.owner_cascade_id
+    }
+
+    /// Set the id of the cascade this record is bound to.
+    pub fn with_owner_cascade_id(mut self, owner_cascade_id: Option<u64>) -> Self {
+        self.owner_cascade_id = owner_cascade_id;
         self
     }
 }
@@ -139,6 +159,14 @@ impl fmt::Display for KVMeta {
             }
             need_comma = true;
             write!(f, "cascade_id: {}", cascade_id)?
+        }
+
+        if let Some(owner_cascade_id) = self.owner_cascade_id {
+            if need_comma {
+                write!(f, ", ")?;
+            }
+            need_comma = true;
+            write!(f, "owner_cascade_id: {}", owner_cascade_id)?
         }
 
         let _ = need_comma;
@@ -275,11 +303,35 @@ mod tests {
             expire_at: Some(100_000_000_001),
             proposed_at_ms: None,
             cascade_id: Some(812),
+            owner_cascade_id: None,
         });
         assert_eq!(kv_meta.cascade_id(), Some(812));
 
         let kv_meta = kv_meta.with_cascade_id(None);
         assert_eq!(kv_meta, KVMeta::new(Some(100_000_000_001), None));
+
+        let kv_meta = KVMeta::new(Some(100_000_000_001), Some(100_000_000_002));
+        let got = kv_meta.owner_cascade_id();
+        assert_eq!(got, None);
+
+        let kv_meta = KVMeta::new_expires_at(100_000_000_001);
+        let got = kv_meta.owner_cascade_id();
+        assert_eq!(got, None);
+
+        let kv_meta = KVMeta::new(Some(100_000_000_001), None).with_owner_cascade_id(Some(900));
+        let want = KVMeta {
+            expire_at: Some(100_000_000_001),
+            proposed_at_ms: None,
+            cascade_id: None,
+            owner_cascade_id: Some(900),
+        };
+        assert_eq!(kv_meta, want);
+        let got = kv_meta.owner_cascade_id();
+        assert_eq!(got, Some(900));
+
+        let kv_meta = kv_meta.with_owner_cascade_id(None);
+        let want = KVMeta::new(Some(100_000_000_001), None);
+        assert_eq!(kv_meta, want);
     }
 
     #[test]
@@ -291,6 +343,7 @@ mod tests {
             expire_at: Some(100_000_000_001),
             proposed_at_ms: Some(100_000_000_002),
             cascade_id: None,
+            owner_cascade_id: None,
         });
 
         // A record without a cascade writes the same JSON as before.
@@ -312,6 +365,26 @@ mod tests {
         assert_eq!(serialized, r#"{"cascade_id":812}"#);
         let deserialized: KVMeta = serde_json::from_str(&serialized).unwrap();
         assert_eq!(deserialized, kv_meta);
+
+        let kv_meta = KVMeta {
+            expire_at: Some(100_000_000_001),
+            proposed_at_ms: Some(100_000_000_002),
+            cascade_id: Some(812),
+            owner_cascade_id: Some(900),
+        };
+        let serialized = serde_json::to_string(&kv_meta).unwrap();
+        assert_eq!(
+            serialized,
+            r#"{"expire_at":100000000001,"proposed_at_ms":100000000002,"cascade_id":812,"owner_cascade_id":900}"#
+        );
+        let deserialized: KVMeta = serde_json::from_str(&serialized).unwrap();
+        assert_eq!(deserialized, kv_meta);
+
+        let kv_meta = KVMeta::default().with_owner_cascade_id(Some(900));
+        let serialized = serde_json::to_string(&kv_meta).unwrap();
+        assert_eq!(serialized, r#"{"owner_cascade_id":900}"#);
+        let deserialized: KVMeta = serde_json::from_str(&serialized).unwrap();
+        assert_eq!(deserialized, kv_meta);
     }
 
     #[test]
@@ -325,5 +398,21 @@ mod tests {
 
         let kv_meta = KVMeta::default().with_cascade_id(Some(812));
         assert_eq!(kv_meta.to_string(), "(cascade_id: 812)");
+
+        let kv_meta = KVMeta {
+            expire_at: Some(100_000_000_001),
+            proposed_at_ms: Some(100_000_000_002),
+            cascade_id: Some(812),
+            owner_cascade_id: Some(900),
+        };
+        let got = kv_meta.to_string();
+        assert_eq!(
+            got,
+            "(expires_at: 1973-03-03T09:46:40.001, proposed_at: 1973-03-03T09:46:40.002, cascade_id: 812, owner_cascade_id: 900)"
+        );
+
+        let kv_meta = KVMeta::default().with_owner_cascade_id(Some(900));
+        let got = kv_meta.to_string();
+        assert_eq!(got, "(owner_cascade_id: 900)");
     }
 }
